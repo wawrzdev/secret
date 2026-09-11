@@ -187,6 +187,45 @@ func TestImportPreservesBytesAndRejectsSymlinks(t *testing.T) {
 	assertFile(t, filepath.Join(root, "stdin", "file"), data, 0600)
 }
 
+func TestEmptyImportDoesNotCreateStoreOrDirectories(t *testing.T) {
+	root := isolated(t)
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, _ := invoke(t, nil, "import", "nested/empty", empty)
+	if code == 0 {
+		t.Fatal("empty file import succeeded")
+	}
+	if _, err := os.Stat(filepath.Dir(root)); !os.IsNotExist(err) {
+		t.Fatalf("empty file import mutated config: %v", err)
+	}
+	code, _, _ = invoke(t, nil, "import", "nested/stdin-empty", "--stdin")
+	if code == 0 {
+		t.Fatal("empty stdin import succeeded")
+	}
+	if _, err := os.Stat(filepath.Dir(root)); !os.IsNotExist(err) {
+		t.Fatalf("empty stdin import mutated config: %v", err)
+	}
+}
+
+func TestEmptyReplacementPreservesPriorValue(t *testing.T) {
+	root := isolated(t)
+	code, _, _ := invoke(t, []byte("old\n"), "set", "token", "--stdin")
+	if code != 0 {
+		t.Fatal("initial set failed")
+	}
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, _ = invoke(t, nil, "import", "token", empty, "--replace")
+	if code == 0 {
+		t.Fatal("empty replacement succeeded")
+	}
+	assertFile(t, filepath.Join(root, "token"), []byte("old"), 0600)
+}
+
 func TestPathTraversalAndDestinationLinks(t *testing.T) {
 	root := isolated(t)
 	for _, name := range []string{"", "../x", "/tmp/x", "a//b", "a/./b", "line\nbreak", `a\b`} {
@@ -554,7 +593,23 @@ func TestReplacementFailurePreservesOldFile(t *testing.T) {
 	assertFile(t, filepath.Join(root, "token"), []byte("old"), 0600)
 }
 
-func TestDirectorySyncFailureReportsPublishedDurabilityUncertainty(t *testing.T) {
+func TestStoreWriteRejectsEmptyContentBeforePublication(t *testing.T) {
+	root := isolated(t)
+	s, err := openStore(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	err = s.Write("empty", strings.NewReader(""), false)
+	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "empty")); !os.IsNotExist(err) {
+		t.Fatalf("empty secret published: %v", err)
+	}
+}
+
+func TestReplacementCommitSyncFailureRestoresPriorValue(t *testing.T) {
 	root := isolated(t)
 	s, err := openStore(true)
 	if err != nil {
@@ -565,13 +620,115 @@ func TestDirectorySyncFailureReportsPublishedDurabilityUncertainty(t *testing.T)
 		t.Fatal(err)
 	}
 	oldSync := syncDirectory
-	syncDirectory = func(int) error { return unix.EIO }
+	calls := 0
+	syncDirectory = func(fd int) error {
+		calls++
+		if calls == 1 {
+			return unix.EIO
+		}
+		return unix.Fsync(fd)
+	}
 	defer func() { syncDirectory = oldSync }()
 	err = s.Write("token", strings.NewReader("new"), true)
-	if err == nil || !strings.Contains(err.Error(), "published") || !strings.Contains(err.Error(), "durability is uncertain") || !errors.Is(err, unix.EIO) {
+	if err == nil || !strings.Contains(err.Error(), "prior value restored") || !errors.Is(err, unix.EIO) || isPostCommit(err) {
+		t.Fatalf("error=%v", err)
+	}
+	assertFile(t, filepath.Join(root, "token"), []byte("old"), 0600)
+}
+
+func TestReplacementRollbackFailureIsExplicitPostCommitState(t *testing.T) {
+	root := isolated(t)
+	s, err := openStore(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Write("token", strings.NewReader("old"), false); err != nil {
+		t.Fatal(err)
+	}
+	oldSync, oldRename := syncDirectory, renameAt
+	syncDirectory = func(int) error { return unix.EIO }
+	renames := 0
+	renameAt = func(oldfd int, old string, newfd int, new string) error {
+		renames++
+		if renames == 2 {
+			return unix.EBUSY
+		}
+		return unix.Renameat(oldfd, old, newfd, new)
+	}
+	defer func() { syncDirectory, renameAt = oldSync, oldRename }()
+	err = s.Write("token", strings.NewReader("new"), true)
+	if err == nil || !isPostCommit(err) || !strings.Contains(err.Error(), "automatic rollback failed") {
 		t.Fatalf("error=%v", err)
 	}
 	assertFile(t, filepath.Join(root, "token"), []byte("new"), 0600)
+	matches, err := filepath.Glob(filepath.Join(root, ".secret-old-*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("recovery backups=%v err=%v", matches, err)
+	}
+	assertFile(t, matches[0], []byte("old"), 0600)
+}
+
+func TestReplacementCleanupSyncFailureIsExplicitPostCommitState(t *testing.T) {
+	root := isolated(t)
+	s, err := openStore(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Write("token", strings.NewReader("old"), false); err != nil {
+		t.Fatal(err)
+	}
+	oldSync := syncDirectory
+	calls := 0
+	syncDirectory = func(fd int) error {
+		calls++
+		if calls == 2 {
+			return unix.EIO
+		}
+		return unix.Fsync(fd)
+	}
+	defer func() { syncDirectory = oldSync }()
+	err = s.Write("token", strings.NewReader("new"), true)
+	if err == nil || !isPostCommit(err) || !strings.Contains(err.Error(), "committed") {
+		t.Fatalf("error=%v", err)
+	}
+	assertFile(t, filepath.Join(root, "token"), []byte("new"), 0600)
+}
+
+func TestNewNestedWriteSyncsCreatedDirectoryChain(t *testing.T) {
+	root := isolated(t)
+	oldSync := syncDirectory
+	calls := 0
+	syncDirectory = func(fd int) error { calls++; return unix.Fsync(fd) }
+	defer func() { syncDirectory = oldSync }()
+	code, _, errOut := invoke(t, []byte("value\n"), "set", "one/two/token", "--stdin")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut)
+	}
+	if calls < 10 {
+		t.Fatalf("only %d directory syncs for first nested write", calls)
+	}
+	assertFile(t, filepath.Join(root, "one", "two", "token"), []byte("value"), 0600)
+}
+
+func TestNestedDirectorySyncFailureRollsBackCreatedDirectory(t *testing.T) {
+	root := isolated(t)
+	s, err := openStore(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	oldSync := syncDirectory
+	syncDirectory = func(int) error { return unix.EIO }
+	defer func() { syncDirectory = oldSync }()
+	err = s.Write("nested/token", strings.NewReader("value"), false)
+	if err == nil || !errors.Is(err, unix.EIO) {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "nested")); !os.IsNotExist(err) {
+		t.Fatalf("failed directory sync left nested directory: %v", err)
+	}
 }
 
 type failingReader struct{}

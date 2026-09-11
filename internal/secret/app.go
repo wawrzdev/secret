@@ -291,6 +291,14 @@ func storeValue(name string, value []byte, flags writeFlags, errOut io.Writer) e
 }
 
 func storeReader(name string, r io.Reader, flags writeFlags, errOut io.Writer) error {
+	first := make([]byte, 1)
+	if _, err := io.ReadFull(r, first); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return errors.New("secret must not be empty")
+		}
+		return fmt.Errorf("read secret: %w", err)
+	}
+	r = io.MultiReader(strings.NewReader(string(first)), r)
 	s, err := openStore(!flags.replace)
 	if err != nil {
 		return err
@@ -424,7 +432,7 @@ func validateName(name string) error {
 	}
 	parts := strings.Split(name, "/")
 	for _, p := range parts {
-		if p == "" || p == "." || p == ".." || p == "env.zsh" || p == lockName || strings.HasPrefix(p, ".secret-tmp-") || strings.Contains(p, " # secret:") {
+		if p == "" || p == "." || p == ".." || p == "env.zsh" || p == lockName || strings.HasPrefix(p, ".secret-tmp-") || strings.HasPrefix(p, ".secret-old-") || strings.Contains(p, " # secret:") {
 			return errors.New("invalid secret name")
 		}
 		for _, r := range p {

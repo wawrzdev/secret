@@ -37,19 +37,25 @@ Names may contain nested path components, but absolute paths, empty components,
 `.`/`..`, control characters, backslashes, helper-reserved names, the internal
 registration marker, and symbolic links are rejected.
 
-`set` reads a non-empty, single-line token. Its default prompt reads from the
+`set` reads a non-empty, single-line token. `import` also rejects an empty input
+before creating the store or any destination directories. The default `set` prompt reads from the
 controlling terminal with echo disabled. `--stdin` requires non-terminal input
 and removes one terminating newline. `import` accepts a regular, non-symlink
 file or non-terminal stdin and preserves every byte. Both commands refuse an
 existing destination unless `--replace` is present.
 
-Writes use a private temporary file in the destination directory. New secrets
+Writes use a private temporary file in the destination directory. New
+directories and their parents are synced as they are created so the complete
+path is crash-durable before publication. New secrets
 are published with an atomic create-if-absent operation; replacements use an
-atomic rename after revalidating the destination. Failures before publication
-leave the old file intact. A directory-sync failure after publication reports
-that the new value is visible but its crash durability is uncertain, so callers
-do not blindly retry. Store traversal uses directory descriptors and no-follow
-opens to prevent a link swap from redirecting a credential write or read.
+atomic rename after revalidating the destination. Replacement retains the old
+inode until the new directory entry is durably committed; a commit-sync failure
+rolls back and re-syncs the old value before reporting an ordinary failure.
+Errors explicitly stating that the new value is committed or visible identify
+the exceptional case where publication passed the commit point or automatic
+rollback itself failed, so callers do not blindly retry. Store traversal uses
+directory descriptors and no-follow opens to prevent a link swap from
+redirecting a credential write or read.
 
 ## Environment paths and child commands
 
