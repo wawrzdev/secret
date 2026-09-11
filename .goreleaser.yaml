@@ -1,0 +1,61 @@
+version: 2
+
+project_name: secret
+
+builds:
+  - id: secret
+    main: .
+    binary: secret
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - ids: [secret]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+      - completions/*
+
+nfpms:
+  - id: packages
+    ids: [secret]
+    package_name: secret
+    vendor: wawrzdev
+    homepage: https://github.com/wawrzdev/secret
+    maintainer: wawrzdev
+    description: Generate and store private machine-local credentials
+    license: MIT
+    formats:
+      - deb
+      - archlinux
+    bindir: /usr/bin
+    contents:
+      - src: completions/_secret
+        dst: /usr/share/zsh/site-functions/_secret
+      - src: completions/secret.bash
+        dst: /usr/share/bash-completion/completions/secret
+      - src: completions/secret.fish
+        dst: /usr/share/fish/vendor_completions.d/secret.fish
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

@@ -1,0 +1,11 @@
+complete -c secret -f
+complete -c secret -n '__fish_use_subcommand' -a generate -d 'Generate a random value'
+complete -c secret -n '__fish_use_subcommand' -a set -d 'Store a single-line token'
+complete -c secret -n '__fish_use_subcommand' -a import -d 'Store a credential file'
+complete -c secret -n '__fish_use_subcommand' -a path -d 'Print an existing secret path'
+complete -c secret -n '__fish_use_subcommand' -a check -d 'Audit the secret store'
+complete -c secret -n '__fish_use_subcommand' -a exec -d 'Expose text to one child command'
+complete -c secret -n '__fish_seen_subcommand_from generate' -a 'url hex base64 uuid'
+complete -c secret -n '__fish_seen_subcommand_from set import' -l replace -d 'Replace an existing secret'
+complete -c secret -n '__fish_seen_subcommand_from set import' -l stdin -d 'Read non-terminal stdin'
+complete -c secret -n '__fish_seen_subcommand_from set import' -l env -r -d 'Register the file path'
