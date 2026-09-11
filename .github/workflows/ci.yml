@@ -22,6 +22,15 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
 
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Syu --noconfirm git go
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+      - run: go vet ./...
+
   release-config:
     runs-on: ubuntu-latest
     steps:
