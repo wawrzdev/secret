@@ -39,7 +39,7 @@ nfpms:
     package_name: secret
     vendor: wawrzdev
     homepage: https://github.com/wawrzdev/secret
-    maintainer: wawrzdev
+    maintainer: Kris Wawrzyniak <wawrz.dev@gmail.com>
     description: Generate and store private machine-local credentials
     license: MIT
     formats:
