@@ -1,15 +1,25 @@
 package secret
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 func isolated(t *testing.T) string {
@@ -139,7 +149,10 @@ func TestInteractiveSetUsesHiddenReader(t *testing.T) {
 	old := readHidden
 	defer func() { readHidden = old }()
 	called := false
-	readHidden = func(prompt string, w io.Writer) ([]byte, error) { called = true; return []byte("hidden"), nil }
+	readHidden = func(prompt string, w io.Writer, in *os.File) ([]byte, error) {
+		called = true
+		return []byte("hidden"), nil
+	}
 	code, _, errOut := invoke(t, nil, "set", "interactive")
 	if code != 0 || !called || strings.Contains(errOut, "hidden") {
 		t.Fatalf("code=%d called=%v stderr=%q", code, called, errOut)
@@ -207,6 +220,29 @@ func TestPathTraversalAndDestinationLinks(t *testing.T) {
 	assertFile(t, target, []byte("safe"), 0600)
 }
 
+func TestReplaceMissingDoesNotCreateStoreOrParents(t *testing.T) {
+	root := isolated(t)
+	config := filepath.Dir(root)
+	code, _, _ := invoke(t, []byte("value\n"), "set", "nested/missing", "--replace", "--stdin")
+	if code == 0 {
+		t.Fatal("replace of missing secret succeeded")
+	}
+	if _, err := os.Stat(config); !os.IsNotExist(err) {
+		t.Fatalf("failed replace created config tree: %v", err)
+	}
+
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	code, _, _ = invoke(t, []byte("value\n"), "set", "nested/missing", "--replace", "--stdin")
+	if code == 0 {
+		t.Fatal("nested replace of missing secret succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(root, "nested")); !os.IsNotExist(err) {
+		t.Fatalf("failed replace created parent: %v", err)
+	}
+}
+
 func TestEnvironmentRegistrationDeterministicAndIdempotent(t *testing.T) {
 	root := isolated(t)
 	for _, tc := range []struct{ name, variable string }{{"zeta", "Z_TOKEN"}, {"alpha", "A_TOKEN"}, {"other", "Z_TOKEN"}} {
@@ -228,6 +264,57 @@ func TestEnvironmentRegistrationDeterministicAndIdempotent(t *testing.T) {
 		t.Fatal("env file contains value")
 	}
 	assertMode(t, filepath.Join(root, "env.zsh"), 0600)
+}
+
+func TestConcurrentCLIRegistrationsAreNotLost(t *testing.T) {
+	root := isolated(t)
+	const count = 40
+	type child struct {
+		cmd    *exec.Cmd
+		stderr bytes.Buffer
+	}
+	children := make([]child, count)
+	for i := 0; i < count; i++ {
+		args, err := json.Marshal([]string{"set", fmt.Sprintf("token-%02d", i), "--stdin", "--env", fmt.Sprintf("TOKEN_%02d", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCLIProcessHelper$")
+		cmd.Env = append(os.Environ(), "SECRET_CLI_HELPER=1", "SECRET_CLI_ARGS="+string(args), "XDG_CONFIG_HOME="+filepath.Dir(root), "SSH_CONNECTION=test")
+		cmd.Stdin = strings.NewReader("value-" + strconv.Itoa(i) + "\n")
+		cmd.Stderr = &children[i].stderr
+		children[i].cmd = cmd
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range children {
+		if err := children[i].cmd.Wait(); err != nil {
+			t.Fatalf("child %d: %v: %s", i, err, children[i].stderr.String())
+		}
+	}
+	code, _, errOut := invoke(t, nil, "check")
+	if code != 0 {
+		t.Fatalf("check after concurrent registration: %s", errOut)
+	}
+	s, err := openStore(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	entries, err := s.readRegistrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != count {
+		t.Fatalf("got %d registrations, want %d", len(entries), count)
+	}
+	for i := 0; i < count; i++ {
+		variable, name := fmt.Sprintf("TOKEN_%02d", i), fmt.Sprintf("token-%02d", i)
+		if entries[variable] != name {
+			t.Errorf("%s=%q, want %q", variable, entries[variable], name)
+		}
+	}
 }
 
 func TestPathCheckAndReadOnlyFailure(t *testing.T) {
@@ -272,6 +359,43 @@ func TestCheckRejectsAlteredRegistrationWithoutRewritingIt(t *testing.T) {
 	assertFile(t, envPath, bad, 0600)
 }
 
+func TestCheckRejectsUnsafeNamesAndEmptyFilesWithoutSpoofing(t *testing.T) {
+	root := isolated(t)
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "empty"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	unsafe := "bad\nOK forged"
+	if err := os.WriteFile(filepath.Join(root, unsafe), []byte("value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := invoke(t, nil, "check")
+	if code == 0 || !strings.Contains(out, "ERROR empty") || !strings.Contains(out, "ERROR unsafe filename") {
+		t.Fatalf("code=%d out=%q", code, out)
+	}
+	if strings.Contains(out, "forged") {
+		t.Fatalf("unsafe filename reached output: %q", out)
+	}
+	code, out, _ = invoke(t, nil, "check", "empty")
+	if code == 0 || out != "" {
+		t.Fatalf("empty named check: code=%d out=%q", code, out)
+	}
+	assertFile(t, filepath.Join(root, "empty"), nil, 0600)
+}
+
+func TestRegistrationMarkerCannotAppearInName(t *testing.T) {
+	root := isolated(t)
+	code, _, _ := invoke(t, []byte("value\n"), "set", "safe # secret:spoof", "--stdin", "--env", "TOKEN")
+	if code == 0 {
+		t.Fatal("accepted ambiguous registration marker")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("invalid name created store: %v", err)
+	}
+}
+
 func TestExecChildOnlyAndBinaryRefusal(t *testing.T) {
 	isolated(t)
 	t.Setenv("TEST_EXEC_VALUE", "parent")
@@ -294,6 +418,113 @@ func TestExecChildOnlyAndBinaryRefusal(t *testing.T) {
 	if code == 0 {
 		t.Fatal("executed binary secret")
 	}
+}
+
+func TestExecReturnsConventionalSignalStatus(t *testing.T) {
+	isolated(t)
+	code, _, _ := invoke(t, []byte("value\n"), "set", "signal", "--stdin")
+	if code != 0 {
+		t.Fatal("set")
+	}
+	code, _, errOut := invoke(t, nil, "exec", "signal", "TOKEN", "--", "/bin/sh", "-c", "kill -TERM $$")
+	if code != 143 || errOut != "" {
+		t.Fatalf("code=%d stderr=%q", code, errOut)
+	}
+}
+
+func TestHiddenTerminalInputSuppressesEchoAndRestoresTerminal(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "config")
+	args, _ := json.Marshal([]string{"set", "pty-secret"})
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCLIProcessHelper$")
+	cmd.Env = append(os.Environ(), "SECRET_CLI_HELPER=pty", "SECRET_CLI_ARGS="+string(args), "XDG_CONFIG_HOME="+config, "SSH_CONNECTION=test")
+	terminal, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	reader := bufio.NewReader(terminal)
+	prefix, err := readPTYUntil(reader, ':', terminal)
+	if err != nil || !strings.Contains(prefix, "Secret:") {
+		more, _ := readPTYUntil(reader, '\n', terminal)
+		t.Fatalf("prompt=%q err=%v", prefix+more, err)
+	}
+	const hidden = "hidden-pty-value"
+	if _, err := terminal.Write([]byte(hidden + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := readPTYUntil(reader, '>', terminal)
+	if err != nil || !strings.Contains(after, "AFTER>") {
+		t.Fatalf("after=%q err=%v", after, err)
+	}
+	if strings.Contains(prefix+after, hidden) {
+		t.Fatalf("hidden value was echoed: %q", prefix+after)
+	}
+	const visible = "echo-restored"
+	if _, err := terminal.Write([]byte(visible + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	rest, err := readPTYUntil(reader, '>', terminal)
+	if err != nil || !strings.Contains(rest, visible) || !strings.Contains(rest, "DONE>") {
+		t.Fatalf("terminal echo was not restored: %q err=%v", rest, err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(config, "secrets", "pty-secret"), []byte(hidden), 0600)
+}
+
+func readPTYUntil(reader *bufio.Reader, delimiter byte, terminal *os.File) (string, error) {
+	type result struct {
+		value string
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() { value, err := reader.ReadString(delimiter); done <- result{value, err} }()
+	select {
+	case got := <-done:
+		return got.value, got.err
+	case <-time.After(10 * time.Second):
+		_ = terminal.Close()
+		return "", errors.New("timed out reading pseudo-terminal")
+	}
+}
+
+func TestStdinModeRefusesTerminal(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "config")
+	args, _ := json.Marshal([]string{"set", "refused", "--stdin"})
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCLIProcessHelper$")
+	cmd.Env = append(os.Environ(), "SECRET_CLI_HELPER=1", "SECRET_CLI_ARGS="+string(args), "XDG_CONFIG_HOME="+config)
+	terminal, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, _ := io.ReadAll(terminal)
+	terminal.Close()
+	err = cmd.Wait()
+	if err == nil || !strings.Contains(string(output), "refuses terminal input") {
+		t.Fatalf("err=%v output=%q", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(config, "secrets")); !os.IsNotExist(err) {
+		t.Fatalf("refusal created store: %v", err)
+	}
+}
+
+func TestCLIProcessHelper(t *testing.T) {
+	mode := os.Getenv("SECRET_CLI_HELPER")
+	if mode == "" {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(os.Getenv("SECRET_CLI_ARGS")), &args); err != nil {
+		os.Exit(97)
+	}
+	code := Run(args, os.Stdin, os.Stdout, os.Stderr)
+	if mode == "pty" && code == 0 {
+		fmt.Fprint(os.Stdout, "AFTER>")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+		fmt.Fprint(os.Stdout, "DONE>")
+	}
+	os.Exit(code)
 }
 
 func TestExecHelper(t *testing.T) {
@@ -321,6 +552,26 @@ func TestReplacementFailurePreservesOldFile(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 	assertFile(t, filepath.Join(root, "token"), []byte("old"), 0600)
+}
+
+func TestDirectorySyncFailureReportsPublishedDurabilityUncertainty(t *testing.T) {
+	root := isolated(t)
+	s, err := openStore(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Write("token", strings.NewReader("old"), false); err != nil {
+		t.Fatal(err)
+	}
+	oldSync := syncDirectory
+	syncDirectory = func(int) error { return unix.EIO }
+	defer func() { syncDirectory = oldSync }()
+	err = s.Write("token", strings.NewReader("new"), true)
+	if err == nil || !strings.Contains(err.Error(), "published") || !strings.Contains(err.Error(), "durability is uncertain") || !errors.Is(err, unix.EIO) {
+		t.Fatalf("error=%v", err)
+	}
+	assertFile(t, filepath.Join(root, "token"), []byte("new"), 0600)
 }
 
 type failingReader struct{}

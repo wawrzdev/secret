@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -237,7 +238,7 @@ func runSet(args []string, in *os.File, errOut io.Writer) error {
 			value = bytesWithoutOneNewline(value)
 		}
 	} else {
-		value, err = readHidden("Secret: ", errOut)
+		value, err = readHidden("Secret: ", errOut, in)
 	}
 	if err != nil {
 		return fmt.Errorf("read token: %w", err)
@@ -290,7 +291,7 @@ func storeValue(name string, value []byte, flags writeFlags, errOut io.Writer) e
 }
 
 func storeReader(name string, r io.Reader, flags writeFlags, errOut io.Writer) error {
-	s, err := openStore(true)
+	s, err := openStore(!flags.replace)
 	if err != nil {
 		return err
 	}
@@ -388,7 +389,7 @@ func runExec(args []string, in *os.File, out, errOut io.Writer) error {
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return &childExitError{code: ee.ExitCode()}
+			return &childExitError{code: processExitCode(ee.ProcessState)}
 		}
 		return fmt.Errorf("start child: %w", err)
 	}
@@ -398,6 +399,13 @@ func runExec(args []string, in *os.File, out, errOut io.Writer) error {
 type childExitError struct{ code int }
 
 func (e *childExitError) Error() string { return fmt.Sprintf("child exited with status %d", e.code) }
+
+func processExitCode(state *os.ProcessState) int {
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return state.ExitCode()
+}
 
 func setEnvironment(env []string, key, value string) []string {
 	prefix := key + "="
@@ -416,7 +424,7 @@ func validateName(name string) error {
 	}
 	parts := strings.Split(name, "/")
 	for _, p := range parts {
-		if p == "" || p == "." || p == ".." || p == "env.zsh" {
+		if p == "" || p == "." || p == ".." || p == "env.zsh" || p == lockName || strings.HasPrefix(p, ".secret-tmp-") || strings.Contains(p, " # secret:") {
 			return errors.New("invalid secret name")
 		}
 		for _, r := range p {
@@ -441,12 +449,16 @@ func validVariable(s string) bool {
 	return true
 }
 
-func terminalPassword(prompt string, errOut io.Writer) ([]byte, error) {
+func terminalPassword(prompt string, errOut io.Writer, in *os.File) ([]byte, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return nil, errors.New("interactive input requires a terminal; use --stdin")
+		if in == nil || !term.IsTerminal(int(in.Fd())) {
+			return nil, errors.New("interactive input requires a terminal; use --stdin")
+		}
+		tty = in
+	} else {
+		defer tty.Close()
 	}
-	defer tty.Close()
 	fmt.Fprint(errOut, prompt)
 	b, err := term.ReadPassword(int(tty.Fd()))
 	fmt.Fprintln(errOut)
