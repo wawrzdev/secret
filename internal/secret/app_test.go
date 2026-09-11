@@ -816,6 +816,7 @@ func TestReleaseAndCIMetadata(t *testing.T) {
 	files := map[string][]string{
 		".goreleaser.yaml": {
 			"-trimpath", "-X main.version={{.Version}}", "maintainer: Kris Wawrzyniak <wawrz.dev@gmail.com>",
+			"archlinux:", "packager: Kris Wawrzyniak <wawrz.dev@gmail.com>",
 			"completions/_secret", "completions/secret.bash", "completions/secret.fish",
 			"'^docs:'", "'^test:'",
 		},
@@ -827,6 +828,7 @@ func TestReleaseAndCIMetadata(t *testing.T) {
 		".github/workflows/release.yml": {
 			"tags:", "'v*'", "fetch-depth: 0", "contents: write", "actions/checkout@v7",
 			"actions/setup-go@v7", "goreleaser-action@v6", "version: '~> v2'",
+			"actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3", "# v9.0.0",
 			"PACKAGES_DISPATCH_TOKEN", "getReleaseByTag", "createDispatchEvent", "repo: 'packages'",
 			"event_type: 'secret-release-published'", "source_commit: context.sha",
 			"release_id: String(release.id)", "checksums_asset_id: String(checksums.id)",
