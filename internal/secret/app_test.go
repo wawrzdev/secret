@@ -62,6 +62,54 @@ func TestBareHelpDoesNotCreateStore(t *testing.T) {
 	}
 }
 
+func TestHelpVersionAndCompletionCommands(t *testing.T) {
+	root := isolated(t)
+	for _, command := range []string{"help", "-h", "--help"} {
+		code, out, errOut := invoke(t, nil, command)
+		if code != 0 || !strings.Contains(out, "secret completion <bash|zsh|fish>") || !strings.Contains(out, "secret version") || errOut != "" {
+			t.Errorf("%s: code=%d stdout=%q stderr=%q", command, code, out, errOut)
+		}
+	}
+	oldVersion := Version
+	Version = "v1.2.3-test"
+	defer func() { Version = oldVersion }()
+	for _, command := range []string{"version", "--version"} {
+		code, out, errOut := invoke(t, nil, command)
+		if code != 0 || out != "v1.2.3-test\n" || errOut != "" {
+			t.Errorf("%s: code=%d stdout=%q stderr=%q", command, code, out, errOut)
+		}
+	}
+	for shell, filename := range map[string]string{"bash": "secret.bash", "zsh": "_secret", "fish": "secret.fish"} {
+		code, out, errOut := invoke(t, nil, "completion", shell)
+		if code != 0 || errOut != "" {
+			t.Fatalf("completion %s: code=%d stderr=%q", shell, code, errOut)
+		}
+		want, err := os.ReadFile(filepath.Join("..", "..", "completions", filename))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != string(want) {
+			t.Errorf("generated %s completion differs from maintained file", shell)
+		}
+		required := []string{"help", "-h", "--help", "version", "--version", "completion", "bash", "zsh", "fish"}
+		if shell == "fish" {
+			required = []string{"help", "-s h", "-l help", "version", "-l version", "completion", "bash", "zsh", "fish"}
+		}
+		for _, item := range required {
+			if !strings.Contains(out, item) {
+				t.Errorf("%s completion omits %q", shell, item)
+			}
+		}
+	}
+	code, out, _ := invoke(t, nil, "completion", "powershell")
+	if code == 0 || out != "" {
+		t.Fatalf("invalid completion: code=%d stdout=%q", code, out)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("metadata commands created store: %v", err)
+	}
+}
+
 func TestCheckAbsentStoreIsValidAndReadOnly(t *testing.T) {
 	root := isolated(t)
 	code, out, errOut := invoke(t, nil, "check")
@@ -760,5 +808,40 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 func TestBuildTargetsSupportedPlatforms(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("release platforms are macOS and Linux")
+	}
+}
+
+func TestReleaseAndCIMetadata(t *testing.T) {
+	root := filepath.Join("..", "..")
+	files := map[string][]string{
+		".goreleaser.yaml": {
+			"-trimpath", "-X main.version={{.Version}}", "maintainer: wawrzdev",
+			"completions/_secret", "completions/secret.bash", "completions/secret.fish",
+			"'^docs:'", "'^test:'",
+		},
+		".github/workflows/ci.yml": {
+			"ubuntu-latest", "macos-latest", "archlinux:base-devel", "actions/checkout@v7",
+			"actions/setup-go@v7", "go-version-file: go.mod", "go fmt ./...", "go test ./...",
+			"go vet ./...", "go test -race ./...", "args: check", "version: '~> v2'",
+		},
+		".github/workflows/release.yml": {
+			"tags:", "'v*'", "fetch-depth: 0", "contents: write", "actions/checkout@v7",
+			"actions/setup-go@v7", "goreleaser-action@v6", "version: '~> v2'",
+			"PACKAGES_DISPATCH_TOKEN", "getReleaseByTag", "createDispatchEvent", "repo: 'packages'",
+			"event_type: 'secret-release-published'", "source_commit: context.sha",
+			"release_id: String(release.id)", "checksums_asset_id: String(checksums.id)",
+			"checksums_digest: checksums.digest", "checksums.txt", ".deb", ".pkg.tar.zst",
+		},
+	}
+	for name, required := range files {
+		content, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range required {
+			if !bytes.Contains(content, []byte(item)) {
+				t.Errorf("%s omits %q", name, item)
+			}
+		}
 	}
 }

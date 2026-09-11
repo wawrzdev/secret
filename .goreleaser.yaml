@@ -2,6 +2,10 @@ version: 2
 
 project_name: secret
 
+before:
+  hooks:
+    - go test ./...
+
 builds:
   - id: secret
     main: .
@@ -17,7 +21,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w
+      - -s -w -X main.version={{.Version}}
 
 archives:
   - ids: [secret]
@@ -59,3 +63,8 @@ changelog:
     exclude:
       - '^docs:'
       - '^test:'
+
+release:
+  github:
+    owner: wawrzdev
+    name: secret

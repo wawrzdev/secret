@@ -8,35 +8,45 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  hosted:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race ./...
+      - name: Check formatting
+        run: |
+          go fmt ./...
+          git diff --exit-code
+      - run: go test ./...
       - run: go vet ./...
+      - run: go test -race ./...
 
   arch:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
       - run: pacman -Syu --noconfirm git go
-      - uses: actions/checkout@v4
-      - run: go test -race ./...
+      - uses: actions/checkout@v7
+      - name: Check formatting
+        run: |
+          go fmt ./...
+          git diff --exit-code
+      - run: go test ./...
       - run: go vet ./...
+      - run: go test -race ./...
 
   release-config:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: latest
+          version: '~> v2'
           args: check

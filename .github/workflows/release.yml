@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Notify packages repository
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          github-token: ${{ secrets.PACKAGES_DISPATCH_TOKEN }}
+          script: |
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: context.ref.replace('refs/tags/', '')
+            })
+            const checksums = release.assets.find((asset) => asset.name === 'checksums.txt')
+            const nativePackages = release.assets.filter((asset) =>
+              asset.name.endsWith('.deb') || asset.name.endsWith('.pkg.tar.zst'))
+            if (!checksums || nativePackages.length === 0) {
+              core.setFailed('release is missing checksums.txt or native package artifacts')
+              return
+            }
+            await github.rest.repos.createDispatchEvent({
+              owner: 'wawrzdev',
+              repo: 'packages',
+              event_type: 'secret-release-published',
+              client_payload: {
+                source_repository: `${context.repo.owner}/${context.repo.repo}`,
+                source_commit: context.sha,
+                release_id: String(release.id),
+                tag_name: release.tag_name,
+                checksums_asset_id: String(checksums.id),
+                checksums_digest: checksums.digest || '',
+                checksums_url: checksums.browser_download_url,
+                release_url: release.html_url
+              }
+            })

@@ -9,5 +9,7 @@
 #   secret path NAME                         print an existing credential's path
 #   secret check [NAME]                      audit types, modes, and registrations
 #   secret exec NAME VARIABLE -- COMMAND     expose text to one child environment
+#   secret completion <bash|zsh|fish>        print maintained shell completions
+#   secret version | secret --version        print the installed version
 #   Add --env VARIABLE to set/import to register the file path in env.zsh.
 #   Values are never accepted as arguments or printed by storage/status commands.

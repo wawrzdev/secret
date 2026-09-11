@@ -26,6 +26,7 @@ const (
 )
 
 var (
+	Version      = "dev"
 	randomReader = io.Reader(rand.Reader)
 	readHidden   = terminalPassword
 	clipboard    = copyClipboard
@@ -45,6 +46,8 @@ Usage:
   secret path NAME
   secret check [NAME]
   secret exec NAME VARIABLE -- COMMAND [ARG...]
+  secret completion <bash|zsh|fish>
+  secret version
 
 The store is ${XDG_CONFIG_HOME:-$HOME/.config}/secrets. Secret values are
 accepted only through hidden terminal input, non-terminal stdin, or an import
@@ -70,6 +73,14 @@ func Run(args []string, in *os.File, out, errOut io.Writer) int {
 		err = runCheck(args[1:], out)
 	case "exec":
 		err = runExec(args[1:], in, out, errOut)
+	case "completion":
+		err = runCompletion(args[1:], out)
+	case "version", "--version":
+		if len(args) != 1 {
+			err = errors.New("version accepts no arguments")
+		} else {
+			_, err = fmt.Fprintln(out, Version)
+		}
 	default:
 		err = fmt.Errorf("unknown command %q", args[0])
 	}

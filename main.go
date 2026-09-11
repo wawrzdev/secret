@@ -8,6 +8,9 @@ import (
 	"github.com/wawrzdev/secret/internal/secret"
 )
 
+var version = "dev"
+
 func main() {
+	secret.Version = version
 	os.Exit(secret.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
