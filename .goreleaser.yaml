@@ -45,6 +45,8 @@ nfpms:
     formats:
       - deb
       - archlinux
+    archlinux:
+      packager: Kris Wawrzyniak <wawrz.dev@gmail.com>
     bindir: /usr/bin
     contents:
       - src: completions/_secret

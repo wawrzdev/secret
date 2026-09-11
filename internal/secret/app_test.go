@@ -815,7 +815,7 @@ func TestReleaseAndCIMetadata(t *testing.T) {
 	root := filepath.Join("..", "..")
 	files := map[string][]string{
 		".goreleaser.yaml": {
-			"-trimpath", "-X main.version={{.Version}}", "maintainer: wawrzdev",
+			"-trimpath", "-X main.version={{.Version}}", "maintainer: Kris Wawrzyniak <wawrz.dev@gmail.com>",
 			"completions/_secret", "completions/secret.bash", "completions/secret.fish",
 			"'^docs:'", "'^test:'",
 		},
