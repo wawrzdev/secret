@@ -822,7 +822,7 @@ func TestReleaseAndCIMetadata(t *testing.T) {
 		},
 		".github/workflows/ci.yml": {
 			"ubuntu-latest", "macos-latest", "archlinux:base-devel", "actions/checkout@v7",
-			"actions/setup-go@v7", "go-version-file: go.mod", "go fmt ./...", "go test ./...",
+			"actions/setup-go@v7", "go-version-file: go.mod", "gofmt -l .", "go test ./...",
 			"go vet ./...", "go test -race ./...", "args: check", "version: '~> v2'",
 		},
 		".github/workflows/release.yml": {
