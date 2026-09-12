@@ -3,7 +3,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { createHash } = require('node:crypto')
-const { expectedNames, validateDraft, assertNewVersion } = require('./release-contract.cjs')
+const { expectedNames, validateDraft, assertNewVersion, selectDraft } = require('./release-contract.cjs')
 
 function fixture(app = 'secret') {
   const tag = 'v0.1.0'
@@ -47,4 +47,15 @@ test('only advances the latest stable version monotonically', () => {
   for (const tag of ['v0.1.9', 'v0.1.8', 'v0.1.10-rc1']) {
     assert.throws(() => assertNewVersion(tag, 'v0.1.9'))
   }
+})
+
+test('selects the exact draft from the authenticated release listing', () => {
+  const draft = { id: 42, tag_name: 'v0.1.0', draft: true }
+  assert.equal(selectDraft([
+    { tag_name: 'v0.1.0', draft: false },
+    { tag_name: 'v0.2.0', draft: true },
+    draft,
+  ], 'v0.1.0'), draft)
+  assert.throws(() => selectDraft([], 'v0.1.0'), /exactly one draft/)
+  assert.throws(() => selectDraft([draft, { ...draft, id: 43 }], 'v0.1.0'), /exactly one draft/)
 })

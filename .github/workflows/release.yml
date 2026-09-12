@@ -61,9 +61,11 @@ jobs:
         with:
           script: |
             const fs = require('node:fs')
-            const { expectedNames, validateDraft, assertNewVersion } = require('./.github/scripts/release-contract.cjs')
+            const { expectedNames, validateDraft, assertNewVersion, selectDraft } = require('./.github/scripts/release-contract.cjs')
             const tag = context.ref.replace('refs/tags/', '')
-            const { data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag })
+            // getReleaseByTag only finds published releases; authenticated listing includes drafts.
+            const releases = await github.paginate(github.rest.repos.listReleases, { ...context.repo, per_page: 100 })
+            const release = selectDraft(releases, tag)
             const files = new Map(expectedNames(context.repo.repo, tag).map(name => [name, fs.readFileSync(`dist/${name}`)]))
             validateDraft(release, context.repo.repo, tag, process.env.SOURCE_COMMIT, files)
             // Recheck after upload in case a maintainer published another version during the build.
