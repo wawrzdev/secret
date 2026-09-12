@@ -60,4 +60,10 @@ function assertNewVersion(tag, latestTag) {
   throw new Error('release must be newer than the current latest version')
 }
 
-module.exports = { expectedNames, validateDraft, assertNewVersion }
+function selectDraft(releases, tag) {
+  const matches = releases.filter(release => release.draft && release.tag_name === tag)
+  if (matches.length !== 1) throw new Error('expected exactly one draft for the release tag')
+  return matches[0]
+}
+
+module.exports = { expectedNames, validateDraft, assertNewVersion, selectDraft }
