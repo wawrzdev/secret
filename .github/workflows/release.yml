@@ -6,54 +6,137 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      source_commit: ${{ steps.source.outputs.commit }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: release --clean
+          persist-credentials: false
+      - name: Require a stable version tag on merged source
+        id: source
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Notify packages repository
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          source_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
+          git merge-base --is-ancestor "$source_commit" "origin/$DEFAULT_BRANCH"
+          echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
+      - name: Refuse to build an older or already published version
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          github-token: ${{ secrets.PACKAGES_DISPATCH_TOKEN }}
           script: |
-            const { data: release } = await github.rest.repos.getReleaseByTag({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag: context.ref.replace('refs/tags/', '')
-            })
-            const checksums = release.assets.find((asset) => asset.name === 'checksums.txt')
-            const nativePackages = release.assets.filter((asset) =>
-              asset.name.endsWith('.deb') || asset.name.endsWith('.pkg.tar.zst'))
-            if (!checksums || nativePackages.length === 0) {
-              core.setFailed('release is missing checksums.txt or native package artifacts')
-              return
+            const { assertNewVersion } = require('./.github/scripts/release-contract.cjs')
+            try {
+              const { data: latest } = await github.rest.repos.getLatestRelease(context.repo)
+              assertNewVersion(context.ref.replace('refs/tags/', ''), latest.tag_name)
+            } catch (error) {
+              if (error.status !== 404) throw error
             }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: 'v2.18.1'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Validate uploaded draft before immutable publication
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        with:
+          script: |
+            const fs = require('node:fs')
+            const { expectedNames, validateDraft, assertNewVersion } = require('./.github/scripts/release-contract.cjs')
+            const tag = context.ref.replace('refs/tags/', '')
+            const { data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag })
+            const files = new Map(expectedNames(context.repo.repo, tag).map(name => [name, fs.readFileSync(`dist/${name}`)]))
+            validateDraft(release, context.repo.repo, tag, process.env.SOURCE_COMMIT, files)
+            // Recheck after upload in case a maintainer published another version during the build.
+            try {
+              const { data: latest } = await github.rest.repos.getLatestRelease(context.repo)
+              assertNewVersion(tag, latest.tag_name)
+            } catch (error) {
+              if (error.status !== 404) throw error
+            }
+            await github.rest.repos.updateRelease({
+              ...context.repo, release_id: release.id, draft: false, prerelease: false, make_latest: 'true'
+            })
+
+  dispatch:
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: package-dispatch
+    permissions:
+      contents: read
+    steps:
+      # Deliberately no source checkout, build tools, or user code in this credential-bearing job.
+      - name: Verify published immutable metadata with the source token
+        id: published
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SOURCE_COMMIT: ${{ needs.release.outputs.source_commit }}
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '')
+            if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag)) throw new Error('not a stable version tag')
+            const { data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag })
+            if (release.draft || release.prerelease || !release.immutable || release.tag_name !== tag || release.target_commitish !== process.env.SOURCE_COMMIT) {
+              throw new Error('release is not final and immutable')
+            }
+            const version = tag.slice(1)
+            const expected = ['checksums.txt']
+            for (const arch of ['amd64', 'arm64']) {
+              for (const os of ['darwin', 'linux']) expected.push(`secret_${version}_${os}_${arch}.tar.gz`)
+              for (const extension of ['deb', 'pkg.tar.zst']) expected.push(`secret_${version}_linux_${arch}.${extension}`)
+            }
+            const names = release.assets.map(asset => asset.name)
+            if (names.length !== expected.length || new Set(names).size !== names.length || expected.some(name => !names.includes(name))) {
+              throw new Error('release asset contract mismatch')
+            }
+            if (release.assets.some(asset => asset.state !== 'uploaded' || !/^sha256:[a-f0-9]{64}$/.test(asset.digest || ''))) {
+              throw new Error('release has incomplete assets')
+            }
+            const checksums = release.assets.find(asset => asset.name === 'checksums.txt')
+            core.setOutput('payload', JSON.stringify({
+              source_repository: `${context.repo.owner}/${context.repo.repo}`,
+              source_commit: process.env.SOURCE_COMMIT,
+              release_id: String(release.id), tag_name: release.tag_name,
+              checksums_asset_id: String(checksums.id), checksums_digest: checksums.digest,
+              checksums_url: checksums.browser_download_url, release_url: release.html_url
+            }))
+      - name: Mint packages-only dispatch token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PACKAGES_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PACKAGES_APP_PRIVATE_KEY }}
+          owner: wawrzdev
+          repositories: packages
+          permission-contents: write
+      - name: Notify packages repository
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_PAYLOAD: ${{ steps.published.outputs.payload }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
             await github.rest.repos.createDispatchEvent({
-              owner: 'wawrzdev',
-              repo: 'packages',
-              event_type: 'secret-release-published',
-              client_payload: {
-                source_repository: `${context.repo.owner}/${context.repo.repo}`,
-                source_commit: context.sha,
-                release_id: String(release.id),
-                tag_name: release.tag_name,
-                checksums_asset_id: String(checksums.id),
-                checksums_digest: checksums.digest || '',
-                checksums_url: checksums.browser_download_url,
-                release_url: release.html_url
-              }
+              owner: 'wawrzdev', repo: 'packages', event_type: 'secret-release-published',
+              client_payload: JSON.parse(process.env.RELEASE_PAYLOAD)
             })

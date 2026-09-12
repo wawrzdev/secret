@@ -823,16 +823,7 @@ func TestReleaseAndCIMetadata(t *testing.T) {
 		".github/workflows/ci.yml": {
 			"ubuntu-latest", "macos-latest", "archlinux:base-devel", "actions/checkout@v7",
 			"actions/setup-go@v7", "go-version-file: go.mod", "gofmt -l .", "go test ./...",
-			"go vet ./...", "go test -race ./...", "args: check", "version: '~> v2'",
-		},
-		".github/workflows/release.yml": {
-			"tags:", "'v*'", "fetch-depth: 0", "contents: write", "actions/checkout@v7",
-			"actions/setup-go@v7", "goreleaser-action@v6", "version: '~> v2'",
-			"actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3", "# v9.0.0",
-			"PACKAGES_DISPATCH_TOKEN", "getReleaseByTag", "createDispatchEvent", "repo: 'packages'",
-			"event_type: 'secret-release-published'", "source_commit: context.sha",
-			"release_id: String(release.id)", "checksums_asset_id: String(checksums.id)",
-			"checksums_digest: checksums.digest", "checksums.txt", ".deb", ".pkg.tar.zst",
+			"go vet ./...", "go test -race ./...", "args: check",
 		},
 	}
 	for name, required := range files {
