@@ -36,6 +36,7 @@ archives:
 nfpms:
   - id: packages
     ids: [secret]
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     package_name: secret
     vendor: wawrzdev
     homepage: https://github.com/wawrzdev/secret
@@ -67,6 +68,9 @@ changelog:
       - '^test:'
 
 release:
+  # Upload and verify all nine assets before the workflow publishes the immutable release.
+  draft: true
+  target_commitish: "{{ .Commit }}"
   github:
     owner: wawrzdev
     name: secret
